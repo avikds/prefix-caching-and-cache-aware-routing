@@ -136,3 +136,120 @@ def savings_report(prompt_lens, cached_lens, prefill_tps, overhead_s):
         "fraction_saved": round(fraction_saved, 6),
     }
 
+# Step 3 - workload
+import numpy as np
+
+def workload(kind, n, rng, vocab=1000):
+    # Generate prompts for the requested workload type.
+    if kind == "chat":
+        # Draw the shared system prompt once and reuse it for every request.
+        system_prompt = rng.integers(0, vocab, size=256).tolist()
+
+        prompts = []
+        for _ in range(n):
+            user_turn = rng.integers(20, 61)
+            prompt = system_prompt + rng.integers(
+                0, vocab, size=user_turn
+            ).tolist()
+            prompts.append(prompt)
+
+        return prompts
+
+    elif kind == "multi_turn":
+        # Create 8 conversations up front, each with its own 64-token opener.
+        conversations = [
+            rng.integers(0, vocab, size=64).tolist()
+            for _ in range(8)
+        ]
+
+        prompts = []
+        for _ in range(n):
+            # Select a conversation and append a new user turn to its history.
+            conversation_idx = rng.integers(0, 8)
+            new_turn_len = rng.integers(20, 61)
+            new_turn = rng.integers(
+                0, vocab, size=new_turn_len
+            ).tolist()
+
+            conversations[conversation_idx].extend(new_turn)
+
+            # Send the entire conversation history.
+            prompts.append(conversations[conversation_idx].copy())
+
+        return prompts
+
+    elif kind == "rag":
+        # Build the document pool once and reuse documents across prompts.
+        documents = [
+            rng.integers(0, vocab, size=200).tolist()
+            for _ in range(50)
+        ]
+
+        # Draw the fixed instruction once for all RAG requests.
+        instruction = rng.integers(0, vocab, size=16).tolist()
+
+        prompts = []
+        for _ in range(n):
+            # Choose 2 distinct documents and preserve the sampled order.
+            doc_indices = rng.choice(50, size=2, replace=False)
+
+            question_len = rng.integers(10, 31)
+            question = rng.integers(
+                0, vocab, size=question_len
+            ).tolist()
+
+            prompt = (
+                instruction
+                + documents[doc_indices[0]]
+                + documents[doc_indices[1]]
+                + question
+            )
+            prompts.append(prompt)
+
+        return prompts
+
+    elif kind == "unique":
+        # Generate a completely random-length prompt for each request.
+        prompts = []
+        for _ in range(n):
+            prompt_len = rng.integers(200, 401)
+            prompt = rng.integers(
+                0, vocab, size=prompt_len
+            ).tolist()
+            prompts.append(prompt)
+
+        return prompts
+
+    else:
+        raise ValueError(
+            "kind must be one of: 'chat', 'multi_turn', 'rag', 'unique'"
+        )
+
+
+def simulate_cache(prompts, cache, prefill_tps, overhead_s):
+    # Record the number of tokens reused from the cache for each prompt.
+    cached_lens = []
+
+    for prompt in prompts:
+        # Lookup must happen before insertion so the current request
+        # receives credit only for blocks already cached.
+        cached_tokens = cache.lookup(prompt)
+        cached_lens.append(cached_tokens)
+
+        # Insert the prompt after the lookup.
+        cache.insert(prompt)
+
+    # Reuse the savings_report implementation from Step 2.
+    prompt_lens = [len(prompt) for prompt in prompts]
+    report = savings_report(
+        prompt_lens,
+        cached_lens,
+        prefill_tps,
+        overhead_s,
+    )
+
+    # Add the cache hit rate to the workload-level report.
+    report["hit_rate"] = cache.hit_rate()
+
+    return report
+
