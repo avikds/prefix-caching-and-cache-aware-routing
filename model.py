@@ -253,3 +253,167 @@ def simulate_cache(prompts, cache, prefill_tps, overhead_s):
 
     return report
 
+# Step 4 - Router
+class Router:
+    def __init__(self, n_replicas, policy, capacity_blocks, block_size, window=32):
+        self.n, self.policy, self.block_size, self.window = (
+            n_replicas,
+            policy,
+            block_size,
+            window,
+        )
+        self.caches = [
+            PrefixCache(capacity_blocks, block_size)
+            for _ in range(n_replicas)
+        ]
+        self.assigned = [0] * n_replicas
+        self.recent = []
+        self.rr = 0
+        self.last_cached = 0
+
+    def load(self, i):
+        # Load is the number of recent requests assigned to replica i.
+        return sum(replica == i for replica in self.recent)
+
+    def route(self, prompt):
+        if self.policy == "round_robin":
+            # Cycle through replicas in order.
+            replica = self.rr % self.n
+            self.rr += 1
+
+        elif self.policy == "least_loaded":
+            # Use the recent load window; lowest index wins ties.
+            loads = [self.load(i) for i in range(self.n)]
+            replica = min(range(self.n), key=lambda i: loads[i])
+
+        elif self.policy == "prefix_hash":
+            # Route using the first full block's chained hash.
+            hashes = block_hashes(prompt, self.block_size)
+            replica = hashes[0] % self.n if hashes else 0
+
+        elif self.policy == "cache_aware":
+            # Determine the longest cached prefix on every replica
+            # without updating cache statistics or LRU timestamps.
+            hashes = block_hashes(prompt, self.block_size)
+            cached_prefixes = []
+
+            for cache in self.caches:
+                match = 0
+
+                for h in hashes:
+                    if h not in cache.blocks:
+                        break
+                    match += 1
+
+                cached_prefixes.append(match)
+
+            # Choose the replica with the longest cached prefix.
+            # Lowest index wins ties.
+            replica = min(
+                range(self.n),
+                key=lambda i: (-cached_prefixes[i], i),
+            )
+
+            # Apply the load safeguard to the selected replica.
+            loads = [self.load(i) for i in range(self.n)]
+            mean_load = sum(loads) / self.n
+
+            if (
+                cached_prefixes[replica] == 0
+                or (
+                    mean_load > 0
+                    and loads[replica] > 2 * mean_load
+                )
+            ):
+                replica = min(range(self.n), key=lambda i: loads[i])
+
+        else:
+            raise ValueError(
+                "policy must be one of: "
+                "'round_robin', 'least_loaded', "
+                "'prefix_hash', 'cache_aware'"
+            )
+
+        # Record the routing decision in the recent load window.
+        self.recent.append(replica)
+
+        if len(self.recent) > self.window:
+            self.recent.pop(0)
+
+        # Track total assignments for imbalance measurement.
+        self.assigned[replica] += 1
+
+        # Lookup before insertion so the current request only receives
+        # credit for blocks that were already cached.
+        self.last_cached = self.caches[replica].lookup(prompt)
+
+        # Populate the selected replica's cache after lookup.
+        self.caches[replica].insert(prompt)
+
+        return replica
+
+
+def simulate_routing(
+    prompts,
+    n_replicas,
+    policy,
+    capacity_blocks,
+    block_size,
+    prefill_tps,
+    overhead_s,
+):
+    router = Router(
+        n_replicas,
+        policy,
+        capacity_blocks,
+        block_size,
+    )
+
+    ttfts = []
+
+    for prompt in prompts:
+        router.route(prompt)
+
+        # Use the cached-token count produced by the chosen replica.
+        ttfts.append(
+            ttft_with_cache(
+                len(prompt),
+                router.last_cached,
+                prefill_tps,
+                overhead_s,
+            )
+        )
+
+    # Combine hit/miss accounting across all replicas.
+    total_hits = sum(cache.hits for cache in router.caches)
+    total_misses = sum(cache.misses for cache in router.caches)
+    total_accesses = total_hits + total_misses
+
+    hit_rate = (
+        total_hits / total_accesses
+        if total_accesses > 0
+        else 0.0
+    )
+
+    # Compute assignment imbalance from total requests assigned
+    # to each replica.
+    mean_assigned = sum(router.assigned) / n_replicas
+
+    imbalance = (
+        max(router.assigned) / mean_assigned
+        if mean_assigned > 0
+        else 0.0
+    )
+
+    mean_ttft = (
+        sum(ttfts) / len(ttfts)
+        if ttfts
+        else 0.0
+    )
+
+    return {
+        "hit_rate": round(hit_rate, 6),
+        "imbalance": round(imbalance, 6),
+        "mean_ttft": round(mean_ttft, 6),
+    }
+
