@@ -417,3 +417,139 @@ def simulate_routing(
         "mean_ttft": round(mean_ttft, 6),
     }
 
+# Step 5 - TieredCache
+class TieredCache:
+    def __init__(self, gpu_blocks, cpu_blocks, block_size, block_bytes, cpu_bandwidth):
+        self.gpu_blocks, self.cpu_blocks, self.block_size = (
+            gpu_blocks,
+            cpu_blocks,
+            block_size,
+        )
+        self.block_bytes, self.cpu_bandwidth = block_bytes, cpu_bandwidth
+        self.gpu, self.cpu = {}, {}
+        self.tick = 0
+        self.gpu_hits = self.cpu_hits = self.misses = 0
+
+    def lookup(self, tokens):
+        # Generate the chained hashes for all complete blocks.
+        hashes = block_hashes(tokens, self.block_size)
+
+        cached_blocks = 0
+        cpu_hits_this_lookup = 0
+
+        # Walk only the leading cached prefix.
+        for h in hashes:
+            # GPU hit: touch the block and continue.
+            if h in self.gpu:
+                self.tick += 1
+                self.gpu[h] = self.tick
+                self.gpu_hits += 1
+                cached_blocks += 1
+                continue
+
+            # CPU hit: promote the block back into GPU.
+            if h in self.cpu:
+                self.cpu_hits += 1
+                cpu_hits_this_lookup += 1
+                cached_blocks += 1
+
+                # Remove it from the CPU tier before promotion.
+                del self.cpu[h]
+
+                # Evict the GPU LRU block when the GPU tier is full.
+                if len(self.gpu) >= self.gpu_blocks:
+                    lru_hash = min(self.gpu, key=self.gpu.get)
+                    lru_tick = self.gpu.pop(lru_hash)
+
+                    # Demote the GPU victim to CPU.
+                    if self.cpu_blocks > 0:
+                        if len(self.cpu) >= self.cpu_blocks:
+                            lru_cpu = min(self.cpu, key=self.cpu.get)
+                            del self.cpu[lru_cpu]
+
+                        self.cpu[lru_hash] = lru_tick
+
+                # Touch the promoted block with a fresh tick.
+                self.tick += 1
+                self.gpu[h] = self.tick
+                continue
+
+            # First block absent from both tiers: stop the prefix walk.
+            self.misses += len(hashes) - cached_blocks
+            break
+        else:
+            # The whole sequence of full blocks was cached.
+            # No additional misses remain.
+            pass
+
+        # If the first missing block was never encountered, no misses were
+        # added above. If it was encountered, the remaining full blocks
+        # were all counted as misses.
+        if cached_blocks == len(hashes):
+            pass
+
+        restore_s = (
+            cpu_hits_this_lookup * self.block_bytes / self.cpu_bandwidth
+            if self.cpu_bandwidth != 0
+            else 0.0
+        )
+
+        return cached_blocks * self.block_size, restore_s
+
+    def insert(self, tokens):
+        # Add every full block that is absent from both tiers.
+        hashes = block_hashes(tokens, self.block_size)
+
+        for h in hashes:
+            if h in self.gpu:
+                # Existing GPU block: touch it.
+                self.tick += 1
+                self.gpu[h] = self.tick
+
+            elif h in self.cpu:
+                # Existing CPU block remains in CPU on insertion.
+                self.tick += 1
+                self.cpu[h] = self.tick
+
+            else:
+                # This block is absent from both tiers, so add it to GPU.
+                if self.gpu_blocks > 0:
+                    # Demote the GPU LRU victim if the GPU tier is full.
+                    if len(self.gpu) >= self.gpu_blocks:
+                        lru_hash = min(self.gpu, key=self.gpu.get)
+                        lru_tick = self.gpu.pop(lru_hash)
+
+                        if self.cpu_blocks > 0:
+                            # CPU keeps its own LRU policy.
+                            if len(self.cpu) >= self.cpu_blocks:
+                                lru_cpu = min(self.cpu, key=self.cpu.get)
+                                del self.cpu[lru_cpu]
+
+                            self.cpu[lru_hash] = lru_tick
+
+                    # Insert the new block with a fresh timestamp.
+                    self.tick += 1
+                    self.gpu[h] = self.tick
+
+
+def ttft_tiered(prompt_len, cached_tokens, restore_s, prefill_tps, overhead_s):
+    # Base cached TTFT plus the time needed to restore CPU hits.
+    ttft = ttft_with_cache(
+        prompt_len,
+        cached_tokens,
+        prefill_tps,
+        overhead_s,
+    ) + restore_s
+
+    return round(ttft, 6)
+
+
+def tier_stats(cache):
+    return {
+        "gpu_hits": cache.gpu_hits,
+        "cpu_hits": cache.cpu_hits,
+        "misses": cache.misses,
+        "gpu_blocks": len(cache.gpu),
+        "cpu_blocks": len(cache.cpu),
+    }
+

@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** ttft_with_cache
 - [x] **3.** workload
 - [x] **4.** Router
+- [x] **5.** TieredCache
 
 ---
 
