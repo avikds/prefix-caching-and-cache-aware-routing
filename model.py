@@ -553,3 +553,77 @@ def tier_stats(cache):
         "cpu_blocks": len(cache.cpu),
     }
 
+# Step 6 - hit_rate_vs_capacity
+def hit_rate_vs_capacity(prompts, capacities, block_size):
+    curve = []
+
+    for capacity in capacities:
+        # Use a fresh cache for each capacity so every measurement
+        # starts from the same empty state.
+        cache = PrefixCache(
+            capacity_blocks=capacity,
+            block_size=block_size,
+        )
+
+        for prompt in prompts:
+            # Lookup first so only blocks already present count as hits.
+            cache.lookup(prompt)
+
+            # Insert the prompt after the lookup.
+            cache.insert(prompt)
+
+        curve.append((capacity, round(cache.hit_rate(), 4)))
+
+    return curve
+
+
+def capacity_knee(curve, target_fraction=0.9):
+    # No meaningful knee exists when the largest cache has zero hit rate.
+    if not curve or curve[-1][1] == 0:
+        return None
+
+    target_hit_rate = target_fraction * curve[-1][1]
+
+    # Return the smallest capacity that reaches the target fraction
+    # of the hit rate achieved by the largest capacity.
+    for capacity, hit_rate in curve:
+        if hit_rate >= target_hit_rate:
+            return capacity
+
+    return None
+
+
+def memory_for_blocks(blocks, block_size, kv_bytes_per_token):
+    # Memory required for the specified number of complete KV blocks.
+    return blocks * block_size * kv_bytes_per_token
+
+
+def cache_report(prompts, capacities, block_size, kv_bytes_per_token):
+    curve = hit_rate_vs_capacity(
+        prompts,
+        capacities,
+        block_size,
+    )
+
+    lines = []
+
+    for capacity, hit_rate in curve:
+        memory_bytes = memory_for_blocks(
+            capacity,
+            block_size,
+            kv_bytes_per_token,
+        )
+
+        # Convert bytes to GB using 1e9 bytes per GB.
+        memory_gb = memory_bytes / 1e9
+
+        lines.append(
+            f"{capacity:6d} blocks {memory_gb:7.2f} GB hit rate {hit_rate:6.1%}"
+        )
+
+    knee = capacity_knee(curve)
+
+    lines.append(f"knee: {knee} blocks")
+
+    return lines
+

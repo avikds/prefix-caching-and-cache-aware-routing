@@ -15,6 +15,7 @@ python scaffold.py
 - [x] **3.** workload
 - [x] **4.** Router
 - [x] **5.** TieredCache
+- [x] **6.** hit_rate_vs_capacity
 
 ---
 
