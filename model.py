@@ -74,3 +74,65 @@ class PrefixCache:
         total = self.hits + self.misses
         return self.hits / total if total else 0.0
 
+# Step 2 - ttft_with_cache
+def ttft_with_cache(prompt_len, cached_tokens, prefill_tps, overhead_s):
+    # Cache lookup/handling overhead plus prefill time for uncached tokens.
+    ttft = overhead_s + (prompt_len - cached_tokens) / prefill_tps
+    return round(ttft, 6)
+
+
+def prefill_saved_s(prompt_len, cached_tokens, prefill_tps):
+    # Time saved by skipping prefill for cached tokens.
+    return cached_tokens / prefill_tps
+
+
+def kv_bytes(tokens, kv_bytes_per_token):
+    # Total KV-cache memory required for the given number of tokens.
+    return tokens * kv_bytes_per_token
+
+
+def blocks_for(memory_bytes, block_size, kv_bytes_per_token):
+    # Number of complete blocks that fit in the available memory.
+    return int(memory_bytes // (block_size * kv_bytes_per_token))
+
+
+def savings_report(prompt_lens, cached_lens, prefill_tps, overhead_s):
+    # TTFT with caching for each request.
+    ttfts = [
+        ttft_with_cache(prompt_len, cached_tokens, prefill_tps, overhead_s)
+        for prompt_len, cached_tokens in zip(prompt_lens, cached_lens)
+    ]
+
+    # TTFT without caching: no cached tokens, but the same cache overhead
+    # is still part of the measured TTFT.
+    ttfts_nocache = [
+        ttft_with_cache(prompt_len, 0, prefill_tps, overhead_s)
+        for prompt_len in prompt_lens
+    ]
+
+    total_prompt_tokens = sum(prompt_lens)
+    total_cached_tokens = sum(cached_lens)
+
+    mean_ttft = sum(ttfts) / len(ttfts)
+    mean_ttft_nocache = sum(ttfts_nocache) / len(ttfts_nocache)
+
+    # Fractional TTFT reduction relative to the no-cache workload.
+    if mean_ttft_nocache != 0:
+        ttft_reduction = 1 - mean_ttft / mean_ttft_nocache
+    else:
+        ttft_reduction = 0.0
+
+    # Fraction of all prompt tokens that were served from cache.
+    if total_prompt_tokens != 0:
+        fraction_saved = total_cached_tokens / total_prompt_tokens
+    else:
+        fraction_saved = 0.0
+
+    return {
+        "mean_ttft": round(mean_ttft, 6),
+        "mean_ttft_nocache": round(mean_ttft_nocache, 6),
+        "ttft_reduction": round(ttft_reduction, 6),
+        "tokens_saved": total_cached_tokens,
+        "fraction_saved": round(fraction_saved, 6),
+    }
+

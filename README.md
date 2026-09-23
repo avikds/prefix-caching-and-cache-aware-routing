@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** PrefixCache
+- [x] **2.** ttft_with_cache
 
 ---
 
