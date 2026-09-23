@@ -17,6 +17,30 @@ python scaffold.py
 - [x] **5.** TieredCache
 - [x] **6.** hit_rate_vs_capacity
 
----
+## Results
 
-Built on Deep-ML.
+```
+KV cache: 128 KB per token, 16-token blocks; 20 GB holds 9536 blocks
+
+one replica, 4096-block cache, 300 requests each:
+  chat       hit rate 88.4%  tokens saved 86.1%  TTFT   34.8 ms ->   22.1 ms
+  multi_turn hit rate 95.0%  tokens saved 94.2%  TTFT   62.1 ms ->   22.5 ms
+  rag        hit rate 44.3%  tokens saved 43.4%  TTFT   41.8 ms ->   32.3 ms
+  unique     hit rate  0.0%  tokens saved  0.0%  TTFT   35.1 ms ->   35.1 ms
+
+eight replicas on multi-turn traffic, 2048 blocks each:
+  round_robin   hit rate 73.5%  imbalance 1.00  mean TTFT   34.5 ms
+  least_loaded  hit rate 73.3%  imbalance 1.22  mean TTFT   34.6 ms
+  prefix_hash   hit rate 96.2%  imbalance 3.10  mean TTFT   22.4 ms
+  cache_aware   hit rate 95.4%  imbalance 1.16  mean TTFT   22.8 ms
+
+64 GPU blocks under mixed traffic: plain cache 2768 hits; with a 4096-block CPU tier 2768 GPU + 416 CPU hits; total TTFT 11.79 s -> 11.50 s
+
+hit rate vs capacity, multi-turn traffic:
+      16 blocks    0.03 GB hit rate   0.3%
+      64 blocks    0.13 GB hit rate   9.4%
+     256 blocks    0.54 GB hit rate  45.5%
+    1024 blocks    2.15 GB hit rate  95.1%
+    4096 blocks    8.59 GB hit rate  95.1%
+  knee: 1024 blocks
+```
